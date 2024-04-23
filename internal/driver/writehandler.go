@@ -4,6 +4,7 @@
 // Copyright (C) 2018 IOTech Ltd
 // Copyright (C) 2021 Schneider Electric
 // Copyright (C) 2024 YIQISOFT
+// Copyright (C) 2024 liushenglong_8597@outlook.com
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -28,26 +29,31 @@ func (d *Driver) HandleWriteCommands(deviceName string, protocols map[string]mod
 	reqs []sdkModel.CommandRequest, params []*sdkModel.CommandValue) error {
 
 	d.Logger.Debugf("Driver.HandleWriteCommands: protocols: %v, resource: %v, parameters: %v", protocols, reqs[0].DeviceResourceName, params)
-	var err error
 
-	// create device client and open connection
-	endpoint, err := FetchEndpoint(protocols)
+	var commandInfos = make([]*CommandInfo, len(reqs))
+
+	for i, req := range reqs {
+		command, err := CreateCommandInfo(req.DeviceResourceName, req.Type, req.Attributes)
+		if err != nil {
+			return err
+		}
+		commandInfos[i] = command
+	}
+
+	info, err := createConnectionInfo(protocols)
 	if err != nil {
 		return err
 	}
-
-	ctx := context.Background()
-	client, _ := opcua.NewClient(endpoint, opcua.SecurityMode(ua.MessageSecurityModeNone))
-	if err := client.Connect(ctx); err != nil {
-		d.Logger.Warnf("Driver.HandleWriteCommands: Failed to connect OPCUA client, %s", err)
+	connection, err := d.uaConnectionPool.GetConnection(deviceName, info)
+	if err != nil {
 		return err
 	}
-	defer client.Close(ctx)
+	defer connection.Close()
 
-	return d.processWriteCommands(client, reqs, params)
+	return d.processWriteCommands(connection.GetClient(), commandInfos, params)
 }
 
-func (d *Driver) processWriteCommands(client *opcua.Client, reqs []sdkModel.CommandRequest, params []*sdkModel.CommandValue) error {
+func (d *Driver) processWriteCommands(client *opcua.Client, reqs []*CommandInfo, params []*sdkModel.CommandValue) error {
 	for i, req := range reqs {
 		err := d.handleWriteCommandRequest(client, req, params[i])
 		if err != nil {
@@ -59,20 +65,19 @@ func (d *Driver) processWriteCommands(client *opcua.Client, reqs []sdkModel.Comm
 	return nil
 }
 
-func (d *Driver) handleWriteCommandRequest(deviceClient *opcua.Client, req sdkModel.CommandRequest,
+func (d *Driver) handleWriteCommandRequest(deviceClient *opcua.Client, req *CommandInfo,
 	param *sdkModel.CommandValue) error {
-	nodeID, err := getNodeID(req.Attributes, NODE)
-	if err != nil {
-		return fmt.Errorf("Driver.handleWriteCommands: %v", err)
+	if req.isMethodCall() {
+		return fmt.Errorf("Driver.handleWriteCommands: Method call is not supported")
 	}
-
+	nodeID := req.nodeId
 	// get NewNodeID
 	id, err := ua.ParseNodeID(nodeID)
 	if err != nil {
 		return fmt.Errorf("Driver.handleWriteCommands: Invalid node id=%s", nodeID)
 	}
 
-	value, err := newCommandValue(req.Type, param)
+	value, err := newCommandValue(req.valueType, param)
 	if err != nil {
 		return err
 	}
