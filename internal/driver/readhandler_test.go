@@ -218,3 +218,120 @@ func TestDriver_HandleReadCommands(t *testing.T) {
 		})
 	}
 }
+
+func Benchmark_HandleReadCommands_ReuseClientWithEncryption(b *testing.B) {
+	certs, err := test.CreateCerts()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer test.Clean(certs)
+
+	remoteCertBytes, err := os.ReadFile(certs.ServerPEMCertPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	remoteCert := string(remoteCertBytes)
+
+	server := test.NewServer("../test/opcua_server.py", certs.ServerPKPath, certs.ServerDERCertPath)
+	defer server.Close()
+
+	d := initDriver(certs.ClientPKPath, certs.ClientPEMCertPath)
+	deviceName := "Test"
+	protocols := map[string]models.ProtocolProperties{
+		Protocol: {
+			EndpointField:       test.Protocol + test.Address,
+			SecurityPolicyField: SecurityPolicyBasic256Sha256,
+			SecurityModeField:   SecurityModeSignAndEncrypt,
+			RemotePemCertField:  remoteCert,
+		},
+	}
+	reqs := []sdkModel.CommandRequest{{
+		DeviceResourceName: "TestVar1",
+		Attributes:         map[string]interface{}{NODE: "ns=2;s=ro_int32"},
+		Type:               common.ValueTypeInt32,
+	}}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err = d.HandleReadCommands(deviceName, protocols, reqs)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func Benchmark_HandleReadCommands_ReuseClient(b *testing.B) {
+	server := test.NewServer("../test/opcua_server.py")
+	defer server.Close()
+
+	d := initSimpleDriver()
+	deviceName := "Test"
+	protocols := map[string]models.ProtocolProperties{
+		Protocol: {
+			EndpointField:       test.Protocol + test.Address,
+			SecurityPolicyField: SecurityPolicyNone,
+		},
+	}
+	reqs := []sdkModel.CommandRequest{{
+		DeviceResourceName: "TestVar1",
+		Attributes:         map[string]interface{}{NODE: "ns=2;s=ro_int32"},
+		Type:               common.ValueTypeInt32,
+	}}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := d.HandleReadCommands(deviceName, protocols, reqs)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func Benchmark_HandleReadCommands_WithoutReuseClient(b *testing.B) {
+	server := test.NewServer("../test/opcua_server.py")
+	defer server.Close()
+
+	d := initSimpleDriver()
+	deviceName := "Test"
+	protocols := map[string]models.ProtocolProperties{
+		Protocol: {
+			EndpointField:       test.Protocol + test.Address,
+			SecurityPolicyField: SecurityPolicyNone,
+		},
+	}
+	reqs := []*CommandInfo{{
+		resourceName: "TestVar1",
+		nodeId:       "ns=2;s=ro_int32",
+		valueType:    common.ValueTypeInt32,
+	}}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := handleReadCommandsWithoutReuseClient(d, deviceName, protocols, reqs)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func handleReadCommandsWithoutReuseClient(
+	d *Driver,
+	deviceName string,
+	protocols map[string]models.ProtocolProperties,
+	reqs []*CommandInfo) ([]*sdkModel.CommandValue, error) {
+
+	d.Logger.Debugf("Driver.HandleReadCommands: protocols: %v resource: %v attributes: %v", protocols, reqs[0].resourceName, reqs[0])
+	info, err := createConnectionInfo(protocols)
+	if err != nil {
+		return nil, err
+	}
+	// create device client and open connection
+	wrapper, err := d.uaConnectionPool.getConnectionUnsafe(info)
+	if err != nil {
+		return nil, err
+	}
+	clientWrapper := wrapper.(ClientWrapper)
+	defer clientWrapper.Close()
+
+	return d.processReadCommands(clientWrapper.GetClient(), reqs)
+}
